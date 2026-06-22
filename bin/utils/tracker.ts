@@ -82,14 +82,95 @@ function sanitizeTrackValue(
 }
 
 export function getTrackErrorReason(error: unknown): string {
-  const candidate =
-    (error as any)?.response?.data?.msg ||
-    (error as any)?.response?.data?.message ||
-    (error as any)?.message ||
-    (error as any)?.toString?.() ||
-    'unknown_error';
+  return sanitizeTrackValue(resolveErrorReason(error), TRACK_REASON_LIMIT) || 'unknown_error';
+}
 
-  return sanitizeTrackValue(candidate) || 'unknown_error';
+function responseDataMessage(data: any): string | undefined {
+  if (typeof data === 'string') {
+    return data;
+  }
+
+  return data?.msg
+    || data?.message
+    || data?.error
+    || data?.data?.msg
+    || data?.data?.message
+    || data?.data?.error
+    || data?.errors?.[0]?.message;
+}
+
+function normalizeReason(candidate: unknown, status?: number): string | undefined {
+  const value = sanitizeTrackValue(candidate, TRACK_REASON_LIMIT);
+  if (!value) {
+    return undefined;
+  }
+
+  const lower = value.toLowerCase();
+
+  if (/^\s*<!doctype\s+html/i.test(value) || /^\s*<html[\s>]/i.test(value)) {
+    return 'api_returned_html';
+  }
+
+  const statusMatch = lower.match(/request failed with status code (\d{3})/);
+  const statusCode = status || (statusMatch ? Number(statusMatch[1]) : undefined);
+  if (statusCode === 520) {
+    return 'gateway_520';
+  }
+
+  if (
+    lower.includes('token authentication failed') ||
+    lower.includes('invalid token') ||
+    lower.includes('token expired') ||
+    lower.includes('authentication failed') ||
+    lower.includes('auth failed') ||
+    lower.includes('unauthorized')
+  ) {
+    return 'token_auth_failed';
+  }
+
+  if (lower.includes('auth not set') || lower.includes('please login first')) {
+    return 'auth_not_set';
+  }
+
+  if (lower.includes('login timeout')) {
+    return 'login_timeout';
+  }
+
+  return value;
+}
+
+function resolveErrorReason(error: unknown, seen = new Set<unknown>()): string {
+  if (error === undefined || error === null || seen.has(error)) {
+    return 'unknown_error';
+  }
+  seen.add(error);
+
+  const maybeError = error as any;
+  const responseData = maybeError?.response?.data;
+  const responseStatus = maybeError?.response?.status;
+
+  const responseReason = normalizeReason(
+    responseDataMessage(responseData),
+    responseStatus,
+  );
+  if (responseReason) {
+    return responseReason;
+  }
+
+  if (maybeError?.cause) {
+    const causeReason = resolveErrorReason(maybeError.cause, seen);
+    if (causeReason && causeReason !== 'unknown_error') {
+      return causeReason;
+    }
+  }
+
+  const messageReason = normalizeReason(maybeError?.message, responseStatus);
+  if (messageReason) {
+    return messageReason;
+  }
+
+  const stringReason = normalizeReason(maybeError?.toString?.(), responseStatus);
+  return stringReason || 'unknown_error';
 }
 
 function resolveTrackAction(event: string, data: TrackData = {}): string {

@@ -1,6 +1,6 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
 
 ## Project Overview
 
@@ -34,7 +34,7 @@ The output is a single CJS file at `dist/index.js` with a shebang, used as the `
   - `domainValidator.ts` — Domain name validation and DNS vs subdomain detection
   - `cliError.ts` — Structured CLI error types
 - `bin/services/uploadService.ts` — Upload orchestration (hash encryption, URL generation)
-- `skills/` — Claude Code skill definitions for this project
+- `skills/` — Codex skill definitions for this project
 
 ## Key Patterns
 

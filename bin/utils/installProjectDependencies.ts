@@ -204,12 +204,57 @@ function runInstall(
   });
 }
 
-function quoteForShell(value: string): string {
+type ShellPlatform = NodeJS.Platform | 'posix';
+
+interface BackgroundInstallCommand {
+  shellBin: string;
+  shellArgs: string[];
+  installCommand: string;
+}
+
+function quoteForShell(value: string, platform: ShellPlatform = process.platform): string {
   // tmp paths / project paths can contain spaces; wrap everything in quotes.
-  if (process.platform === 'win32') {
+  if (platform === 'win32') {
     return `"${value}"`;
   }
   return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+export function buildBackgroundInstallCommand(
+  script: InstallScript,
+  logPath: string,
+  exitCodePath: string,
+  platform: ShellPlatform = process.platform,
+): BackgroundInstallCommand {
+  const args = getInstallArgs(script);
+  const npmCmd = platform === 'win32' ? 'npm' : getNpmCommand();
+  const installCommand = `${npmCmd} ${args.map((arg) => quoteForShell(arg, platform)).join(' ')}`;
+  const qLog = quoteForShell(logPath, platform);
+  const qExit = quoteForShell(exitCodePath, platform);
+
+  if (platform === 'win32') {
+    // Enable delayed expansion so !errorlevel! is evaluated after npm exits.
+    return {
+      shellBin: process.env.ComSpec || 'cmd.exe',
+      shellArgs: [
+        '/d',
+        '/s',
+        '/v:on',
+        '/c',
+        `${installCommand} >> ${qLog} 2>&1 & echo !errorlevel! > ${qExit}`,
+      ],
+      installCommand,
+    };
+  }
+
+  return {
+    shellBin: '/bin/sh',
+    shellArgs: [
+      '-c',
+      `${installCommand} >> ${qLog} 2>&1; printf '%s' "$?" > ${qExit}`,
+    ],
+    installCommand,
+  };
 }
 
 /**
@@ -228,7 +273,6 @@ function quoteForShell(value: string): string {
  */
 export function startBackgroundInstall(cwd: string): { logPath: string } {
   const script = getInstallScript(cwd, 'auto');
-  const args = getInstallArgs(script);
   const logPath = path.join(cwd, INSTALL_LOG_FILE);
   const exitCodePath = path.join(cwd, INSTALL_EXITCODE_FILE);
   const pidPath = path.join(cwd, INSTALL_PID_FILE);
@@ -238,24 +282,7 @@ export function startBackgroundInstall(cwd: string): { logPath: string } {
   fs.removeSync(pidPath);
   fs.writeFileSync(logPath, `[pinme] ${new Date().toISOString()} starting "npm ${script}"\n`);
 
-  const npmCmd = process.platform === 'win32' ? 'npm' : getNpmCommand();
-  const installCmd = `${npmCmd} ${args.map(quoteForShell).join(' ')}`;
-  const qLog = quoteForShell(logPath);
-  const qExit = quoteForShell(exitCodePath);
-
-  let shellBin: string;
-  let shellArgs: string[];
-  if (process.platform === 'win32') {
-    // cmd.exe: chain with `&`, capture %errorlevel%.
-    const command = `${installCmd} >> ${qLog} 2>&1 & echo %errorlevel% > ${qExit}`;
-    shellBin = process.env.ComSpec || 'cmd.exe';
-    shellArgs = ['/d', '/s', '/c', command];
-  } else {
-    // POSIX sh: `$?` after the install is the install's exit code.
-    const command = `${installCmd} >> ${qLog} 2>&1; printf '%s' "$?" > ${qExit}`;
-    shellBin = '/bin/sh';
-    shellArgs = ['-c', command];
-  }
+  const { shellBin, shellArgs } = buildBackgroundInstallCommand(script, logPath, exitCodePath);
 
   const child = spawn(shellBin, shellArgs, {
     cwd,

@@ -2,11 +2,13 @@ node_modules
 /dist
 .DS_Store
 .env
-/test
+/test-output
 /temp
 /test-repro
 .catpaw
 .claude/settings.local.json
 chrome-test-1
 docs/*
-tests/*
+coverage/
+.stryker-tmp/
+reports/mutation/

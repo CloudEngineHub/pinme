@@ -26,6 +26,7 @@ Website: [https://pinme.eth.limo/](https://pinme.eth.limo/)
 - [Authentication and Account Commands](#authentication-and-account-commands)
 - [Static Uploads and IPFS Utilities](#static-uploads-and-ipfs-utilities)
 - [Command Reference](#command-reference)
+- [Development and Testing](#development-and-testing)
 - [Limits and Operational Notes](#limits-and-operational-notes)
 - [Examples](#examples)
 - [Support](#support)
@@ -339,6 +340,24 @@ pinme rm <value>
 | `pinme wallet` / `pinme wallet-balance` / `pinme balance` | Show current wallet balance                                  |
 | `pinme list` / `pinme ls`                                 | Show upload history                                          |
 | `pinme help`                                              | Show CLI help                                                |
+
+## Development and Testing
+
+PinMe uses Vitest for unit/integration tests, real `dist/index.js` CLI smoke tests, npm package checks, and Stryker for slower mutation testing.
+
+```bash
+npm run test           # Unit and integration tests
+npm run test:coverage  # Coverage gate for core modules
+npm run test:cli       # Real CLI black-box tests
+npm run test:pack      # npm pack/package-shape checks
+npm run verify         # Full pull-request gate
+npm run test:mutation  # Slow mutation tests for manual/nightly runs
+```
+
+Tests must not call live PinMe/IPFS/CAR services. Use `nock`, local loopback servers, fixtures, and temporary HOME directories for API and CLI scenarios.
+
+For the full testing policy, layout, and mutation-testing guidance, see
+[TESTING.md](TESTING.md).
 
 ## Limits and Operational Notes
 

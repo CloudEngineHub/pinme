@@ -4,7 +4,6 @@ import path from 'path';
 import inquirer from 'inquirer';
 import axios from 'axios';
 import AdmZip from 'adm-zip';
-import { execSync } from 'child_process';
 import { getAuthHeaders } from './utils/webLogin';
 import { startBackgroundInstall } from './utils/installProjectDependencies';
 import {
@@ -18,6 +17,7 @@ import { uploadPath } from './services/uploadService';
 import { printHighlightedUrl } from './utils/urlDisplay';
 import { patchPrebuiltFrontendDist } from './utils/prebuiltDistConfig';
 import { getValidatedWorkerMetadataContent } from './utils/workerMetadata';
+import { downloadFileWithRetries, getDownloadErrorMessage } from './utils/downloadFile';
 import tracker, { getTrackErrorReason } from './utils/tracker';
 import {
   TRACK_EVENTS,
@@ -212,37 +212,30 @@ export default async function createCmd(options: CreateOptions): Promise<void> {
     console.log(chalk.blue('\n2. Downloading template from repository...'));
     const zipPath = path.join(PROJECT_DIR, 'template.zip');
     const extractDir = path.join(PROJECT_DIR, `.pinme-template-${Date.now()}`);
-    const templateZipUrl = getTemplateZipUrl(TEMPLATE_BRANCH);
-    let downloadSuccess = false;
+    const templateZipUrl =
+      process.env.PINME_TEMPLATE_ZIP_URL || getTemplateZipUrl(TEMPLATE_BRANCH);
     console.log(chalk.gray(`   Template branch: ${TEMPLATE_BRANCH}`));
-    
-    // Retry download up to 3 times
-    for (let attempt = 1; attempt <= 3 && !downloadSuccess; attempt++) {
-      try {
-        console.log(chalk.gray(`   Download attempt ${attempt}/3...`));
-        
-        // Download zip file
-        execSync(`curl -L --retry 3 --retry-delay 2 -o "${zipPath}" "${templateZipUrl}"`, {
-          stdio: 'inherit',
-        });
-        
-        // Check if file was downloaded successfully
-        if (!fs.existsSync(zipPath) || fs.statSync(zipPath).size < 100) {
-          throw new Error('Downloaded file is too small or empty');
-        }
-        
-        downloadSuccess = true;
-      } catch (downloadError: any) {
-        console.log(chalk.yellow(`   Attempt ${attempt} failed: ${downloadError.message}`));
-        if (fs.existsSync(zipPath)) {
-          fs.removeSync(zipPath);
-        }
-        if (attempt === 3) {
-          throw new Error(`Failed to download template after 3 attempts: ${downloadError.message}`);
-        }
-      }
+
+    try {
+      const downloadResult = await downloadFileWithRetries(templateZipUrl, zipPath, {
+        attempts: 3,
+        retryDelayMs: 2000,
+        minBytes: 100,
+        onAttempt: (attempt, attempts) => {
+          console.log(chalk.gray(`   Download attempt ${attempt}/${attempts}...`));
+        },
+        onAttemptFailure: (attempt, error) => {
+          console.log(chalk.yellow(`   Attempt ${attempt} failed: ${getDownloadErrorMessage(error)}`));
+        },
+      });
+      console.log(chalk.green(`   Template archive downloaded (${downloadResult.bytes} bytes)`));
+    } catch (error: any) {
+      throw createCommandError('template download', `download "${templateZipUrl}" to "${zipPath}"`, error, [
+        'Check your network connection and retry `pinme create`.',
+        `Verify that the template branch exists: ${TEMPLATE_BRANCH}`,
+      ]);
     }
-    
+
     try {
       fs.ensureDirSync(extractDir);
 

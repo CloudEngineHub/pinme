@@ -244,5 +244,6 @@ export {
   saveUploadHistory,
   getUploadHistory,
   displayUploadHistory,
-  clearUploadHistory
+  clearUploadHistory,
+  formatHistoryUrl,
 }; 
