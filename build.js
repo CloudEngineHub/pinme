@@ -2,15 +2,19 @@ require('dotenv').config();
 const esbuild = require('esbuild');
 
 const define = {};
+function stringifyEnvDefine(value) {
+  return value === undefined ? 'undefined' : JSON.stringify(value);
+}
+
 for (const key in process.env) {
   // Skip env vars with invalid identifier characters (e.g., Windows vars like ProgramFiles(x86))
   if (/^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(key)) {
-    define[`process.env.${key}`] = JSON.stringify(process.env[key]);
+    define[`process.env.${key}`] = stringifyEnvDefine(process.env[key]);
   }
 }
 
-define['process.env.IPFS_PREVIEW_URL'] = JSON.stringify(process.env.IPFS_PREVIEW_URL);
-define['process.env.SECRET_KEY'] = JSON.stringify(process.env.SECRET_KEY);
+define['process.env.IPFS_PREVIEW_URL'] = stringifyEnvDefine(process.env.IPFS_PREVIEW_URL);
+define['process.env.SECRET_KEY'] = stringifyEnvDefine(process.env.SECRET_KEY);
 
 esbuild.build({
   entryPoints: ['bin/index.ts'],
