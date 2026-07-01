@@ -1,5 +1,6 @@
 import path from 'path';
 import { chmod, mkdir, readFile, writeFile } from 'fs/promises';
+import { setTimeout as delay } from 'timers/promises';
 import AdmZip from 'adm-zip';
 import { describe, expect, test } from 'vitest';
 import {
@@ -200,6 +201,114 @@ describe('pinme CLI success paths with local APIs', () => {
         '/up_status?trace_id=trace-1&uid=0x1234567890abcdef',
         '/root_domain',
       ]);
+    } finally {
+      if (bundle) {
+        await bundle.cleanup();
+      }
+      await server.close();
+      await temp.cleanup();
+    }
+  });
+
+  test('upload limits concurrent chunk uploads to five', async () => {
+    const temp = await createTempHome();
+    let bundle: Awaited<ReturnType<typeof buildCliWithEnv>> | undefined;
+    let activeUploads = 0;
+    let maxActiveUploads = 0;
+    const server = await startLocalHttpServer(async (request, response) => {
+      const bodyText = request.body.toString('utf8');
+
+      if (request.method === 'POST' && request.url === '/chunk/init') {
+        response.writeHead(200, { 'Content-Type': 'application/json' });
+        response.end(
+          JSON.stringify({
+            code: 200,
+            data: {
+              session_id: 'limited-session-1',
+              total_chunks: 8,
+              chunk_size: 1,
+            },
+          }),
+        );
+        return;
+      }
+
+      if (request.method === 'POST' && request.url === '/chunk/upload') {
+        expect(bodyText).toContain('limited-session-1');
+        activeUploads++;
+        maxActiveUploads = Math.max(maxActiveUploads, activeUploads);
+        await delay(50);
+        activeUploads--;
+
+        response.writeHead(200, { 'Content-Type': 'application/json' });
+        response.end(
+          JSON.stringify({
+            code: 200,
+            data: { chunk_index: 0, chunk_size: request.body.length },
+          }),
+        );
+        return;
+      }
+
+      if (request.method === 'POST' && request.url === '/chunk/complete') {
+        response.writeHead(200, { 'Content-Type': 'application/json' });
+        response.end(
+          JSON.stringify({
+            code: 200,
+            data: { trace_id: 'limited-trace-1' },
+          }),
+        );
+        return;
+      }
+
+      if (
+        request.method === 'GET' &&
+        request.url ===
+          '/up_status?trace_id=limited-trace-1&uid=0x1234567890abcdef'
+      ) {
+        response.writeHead(200, { 'Content-Type': 'application/json' });
+        response.end(
+          JSON.stringify({
+            code: 200,
+            data: {
+              is_ready: true,
+              upload_rst: {
+                Bytes: 8,
+                Name: 'multi-chunk.txt',
+                Size: 8,
+                Hash: 'bafy-limited-success',
+              },
+            },
+          }),
+        );
+        return;
+      }
+
+      response.writeHead(404, { 'Content-Type': 'application/json' });
+      response.end(JSON.stringify({ code: 404, msg: 'unexpected request' }));
+    });
+
+    try {
+      const filePath = path.join(temp.home, 'multi-chunk.txt');
+      await writeFile(filePath, '12345678');
+      bundle = await buildCliWithEnv({
+        IPFS_API_URL: server.baseUrl,
+        PINME_API_BASE: server.baseUrl,
+        POLL_INTERVAL_SECONDS: '0',
+        MAX_POLL_TIME_MINUTES: '1',
+      });
+      await writeAuthConfig(temp.home);
+      const result = await runCli(['upload', filePath], {
+        home: temp.home,
+        cliPath: bundle.cliPath,
+        timeout: 20000,
+      });
+
+      expect(result.exitCode, outputOf(result)).toBe(0);
+      expect(maxActiveUploads).toBeLessThanOrEqual(5);
+      expect(
+        server.requests.filter((request) => request.url === '/chunk/upload'),
+      ).toHaveLength(8);
     } finally {
       if (bundle) {
         await bundle.cleanup();

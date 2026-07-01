@@ -26,6 +26,7 @@ const COMPLETE_TO_STATUS_DELAY = 5000;
 const PROGRESS_UPDATE_INTERVAL = 200; // ms
 const EXPECTED_UPLOAD_TIME = 60000; // 60 seconds
 const MAX_PROGRESS = 0.9; // 90%
+const MAX_CONCURRENT_CHUNK_UPLOADS = 5;
 
 // Type definitions
 interface ChunkSessionResponse {
@@ -545,6 +546,25 @@ async function delayWithAbortCheck(
   });
 }
 
+async function runTasksWithConcurrency(
+  tasks: Array<() => Promise<void>>,
+  limit: number,
+): Promise<PromiseSettledResult<void>[]> {
+  let nextIndex = 0;
+
+  async function worker(): Promise<void> {
+    while (nextIndex < tasks.length) {
+      const task = tasks[nextIndex++];
+      await task();
+    }
+  }
+
+  const workerCount = Math.min(limit, tasks.length);
+  return Promise.allSettled(
+    Array.from({ length: workerCount }, () => worker()),
+  );
+}
+
 async function uploadFileChunks(
   filePath: string,
   sessionId: string,
@@ -596,7 +616,10 @@ async function uploadFileChunks(
   });
 
   try {
-    const results = await Promise.allSettled(uploadTasks.map((task) => task()));
+    const results = await runTasksWithConcurrency(
+      uploadTasks,
+      MAX_CONCURRENT_CHUNK_UPLOADS,
+    );
     const failedResults = results.filter(
       (result) => result.status === 'rejected',
     );
