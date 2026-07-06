@@ -231,7 +231,7 @@ await uniweb.webhooks.remove();
 await uniweb.webhooks.rollSecret();   // returns new webhookSecret when available
 ```
 
-The webhook signing secret is wallet-level. PinMe injects the same `UNIWEB_WEBHOOK_SECRET` into all projects owned by the same PinMe user after UniwebPay credentials and the wallet webhook secret are provisioned. Business webhook URLs do not need to be shared across projects: when creating payment links or products, pass the project Worker webhook URL as `webhookUrl`. Do not call `uniweb.webhooks.set`, `uniweb.webhooks.remove`, or `uniweb.webhooks.rollSecret` from ordinary project routes because they mutate the shared wallet fallback webhook and can rotate the shared secret.
+The webhook signing secret is wallet-level. PinMe injects the same `UNIWEB_WEBHOOK_SECRET` into all projects owned by the same PinMe user after UniwebPay credentials and the wallet webhook secret are provisioned. Business webhook URLs do not need to be shared across projects: when creating payment links or products, pass the project Worker webhook URL as `webhookUrl`, built from the injected `env.WORKER_URL` (e.g. `new URL("/api/pay/webhook", env.WORKER_URL)`). Prefer `env.WORKER_URL` over deriving the host from `request.url` so the callback always points at the deployed Worker regardless of which host or route handled the current request. Do not call `uniweb.webhooks.set`, `uniweb.webhooks.remove`, or `uniweb.webhooks.rollSecret` from ordinary project routes because they mutate the shared wallet fallback webhook and can rotate the shared secret.
 
 ## PinMe Security Rules
 
@@ -240,6 +240,7 @@ The webhook signing secret is wallet-level. PinMe injects the same `UNIWEB_WEBHO
 - Do not call old VibeCash APIs or PinMe VibeCash proxy routes.
 - Do not call PinMe payment APIs with `X-API-Key` for UniwebPay checkout. The Worker calls UniwebPay directly through the SDK.
 - Treat `successUrl` and `cancelUrl` as UX only. Grant access only after verified webhook processing or another explicit server-side verification path.
+- The webhook route must be reachable without the project's own auth. UniwebPay callbacks carry only `uniweb-Signature` (plus `uniweb-Event-Id` / `uniweb-Timestamp`), never the project `API_KEY`. If a global auth guard wraps all routes, exempt `WEBHOOK_PATH` from it and rely solely on signature verification for trust; otherwise callbacks get 401/403 and orders never fulfill.
 - Validate user input before SDK calls: amount, currency, quantity, product/price IDs, payment method types, order ownership, and metadata shape.
 - For D1-backed orders, persist a pending order before or immediately after creating the link/session, then make fulfillment idempotent.
 
@@ -247,7 +248,22 @@ The webhook signing secret is wallet-level. PinMe injects the same `UNIWEB_WEBHO
 
 PinMe automatically injects `UNIWEB_WEBHOOK_SECRET` after UniwebPay credentials and the wallet webhook secret are provisioned, then the Worker is redeployed. Keep the binding optional in TypeScript because new projects can exist before UniwebPay provisioning or before redeploy.
 
-PinMe may maintain a managed wallet-level fallback webhook URL only to obtain and preserve the signing secret. That fallback is not the project's business webhook endpoint. To route business events to the current Worker project, set a project-specific `webhookUrl` when creating UniwebPay payment links or products.
+PinMe may maintain a managed wallet-level fallback webhook URL only to obtain and preserve the signing secret. That fallback is not the project's business webhook endpoint. To route business events to the current Worker project, set a project-specific `webhookUrl` when creating UniwebPay payment links or products, building it from the injected `env.WORKER_URL` (e.g. `new URL(WEBHOOK_PATH, env.WORKER_URL).toString()`).
+
+Delivery precedence: a per-link `webhookUrl` overrides a per-product `webhookUrl`, which overrides the wallet fallback. Set `webhookUrl` on whichever resource generates the payment:
+
+- Payment links: pass `webhookUrl` on `links.create`.
+- Checkout sessions: `checkout.create` takes no `webhookUrl`; its events route through the backing product, so set `webhookUrl` on the `products.create` (or reused product) that the session's price belongs to.
+- Do not rely on the wallet fallback for business events — it is shared across all of the user's projects and is only there to hold the signing secret.
+
+When building the `webhookUrl`:
+
+- Keep the callback path in a single shared constant (e.g. `const WEBHOOK_PATH = "/api/pay/webhook"`) used both by the router and by `webhookUrl` construction, so the path passed to UniwebPay always matches the route the Worker actually serves. A mismatch makes callbacks 404 and orders stay stuck in `pending`.
+- Use `env.WORKER_URL` as the base. It equals the project's `api_domain` platform subdomain and is the only public address available at runtime; the user's custom domain is not in `env`.
+- In non-HTTP contexts (cron triggers, queue consumers) there is no `request`, so `env.WORKER_URL` is the only usable source — fail loudly if it is missing rather than emitting a broken URL.
+- Local dev has no `WORKER_URL`; a `request.url` fallback resolves to `localhost`, which UniwebPay cannot reach. To test webhooks locally, expose the Worker through a tunnel (cloudflared / ngrok) and use that public URL.
+- Put no secrets or trust-bearing data in the `webhookUrl`. Carry correlation such as `orderId` in `metadata`, not the query string; verify identity from the signature plus `metadata`, since a URL query can be forged.
+- `webhookUrl` must be HTTPS. `env.WORKER_URL` already is; just do not downgrade it.
 
 When implementing webhooks:
 
@@ -258,6 +274,7 @@ When implementing webhooks:
 - Return `500` for temporary processing failures so UniwebPay retries.
 - Enforce idempotency with `event.id`, payment id, checkout session id, or the app's order id.
 - Before fulfillment, verify expected amount, currency, metadata, and current order state.
+- Respond within UniwebPay's 10s delivery timeout, and do not put the webhook route behind a redirect — delivery does not follow redirects. Retries are sent after 5 minutes, 30 minutes, 2 hours, and 12 hours, then the event is marked failed after 6 attempts.
 
 ## Persistence Guidance
 
@@ -284,4 +301,4 @@ Do not store API keys, webhook secrets, or `UNIWEB_SECRET`.
 - No secret is exposed in source, responses, logs, D1, tests, or docs.
 - Amounts and currencies are validated as integer minor-unit payments.
 - Fulfillment does not rely on browser redirects.
-- Webhook code is raw-body based, verifies with `UNIWEB_WEBHOOK_SECRET`, and payment creation passes a project-specific `webhookUrl` when events are required.
+- Webhook code is raw-body based, verifies with `UNIWEB_WEBHOOK_SECRET`, and payment creation passes a project-specific `webhookUrl` built from `env.WORKER_URL` when events are required.

@@ -24,6 +24,7 @@ export interface Env {
   UNIWEB_PAY_URL?: string;
   UNIWEB_WALLET_ID?: string;
   PROJECT_NAME?: string;
+  WORKER_URL?: string;
   DB?: D1Database;
   UNIWEB_WEBHOOK_SECRET?: string;
 }
@@ -102,8 +103,18 @@ function paymentUrl(payload: { url?: string; paymentUrl?: string }): string {
   return url;
 }
 
-function projectWebhookUrl(request: Request, path = "/api/pay/webhook"): string {
-  return new URL(path, request.url).toString();
+// Single source of truth for the webhook path. Use it both here and in the
+// router so the webhookUrl sent to UniwebPay always matches the served route.
+const WEBHOOK_PATH = "/api/pay/webhook";
+
+function projectWebhookUrl(env: Env, request: Request, path = WEBHOOK_PATH): string {
+  // Prefer the PinMe-injected WORKER_URL: it is the only in-runtime source of
+  // the Worker's public host (equal to the project's api_domain platform
+  // subdomain). The user's custom domain is not injected into env. Fall back to
+  // request.url only for older deploys missing the binding; in non-HTTP contexts
+  // (cron/queue) there is no request, so require WORKER_URL instead.
+  const base = env.WORKER_URL || request.url;
+  return new URL(path, base).toString();
 }
 ```
 
@@ -137,7 +148,7 @@ async function createPaymentLink(request: Request, env: Env): Promise<Response> 
   const amount = assertAmountCents(input.amountCents);
   const currency = normalizeCurrency(input.currency);
   const paymentMethodTypes = normalizePaymentMethods(input.paymentMethodTypes, currency);
-  const webhookUrl = projectWebhookUrl(request);
+  const webhookUrl = projectWebhookUrl(env, request);
   const uniweb = uniwebClient(env);
 
   try {
@@ -200,7 +211,7 @@ async function createCheckoutSession(request: Request, env: Env): Promise<Respon
   const currency = normalizeCurrency(input.currency);
   const quantity = Math.max(1, Math.floor(Number(input.quantity || 1)));
   const paymentMethodTypes = normalizePaymentMethods(input.paymentMethodTypes, currency);
-  const webhookUrl = projectWebhookUrl(request);
+  const webhookUrl = projectWebhookUrl(env, request);
   const uniweb = uniwebClient(env);
 
   try {
@@ -334,11 +345,15 @@ async function handleUniwebWebhook(request: Request, env: Env): Promise<Response
 
 Rules:
 
+- Keep the webhook route outside the project's own auth. Callbacks carry only `uniweb-Signature` (plus `uniweb-Event-Id` / `uniweb-Timestamp`), never the project `API_KEY`; trust comes from `verifyWebhook`, not from an auth guard.
 - Read the raw body exactly once before verification.
 - Return 400 for bad signatures so UniwebPay does not retry impossible deliveries.
 - Return 500 for temporary processing failures so UniwebPay can retry.
 - Make event handling idempotent with `event.id`.
 - Check amount, currency, metadata, and current order state before granting access.
+- Respond within 10s and do not redirect the webhook route; delivery has a 10s timeout and does not follow redirects.
+
+Delivery precedence: a per-link `webhookUrl` overrides a per-product `webhookUrl`, which overrides the wallet fallback. Set `webhookUrl` on the resource that creates the payment — on `links.create` for payment links, and on `products.create` for checkout sessions (`checkout.create` has no `webhookUrl`; its events route through the backing product).
 
 ## Minimal Router
 
@@ -347,9 +362,14 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
 
+    // The webhook route must stay reachable WITHOUT the project's own auth:
+    // UniwebPay callbacks carry only uniweb-Signature, never the project API_KEY.
+    // Verify it here first (before any auth guard) so callbacks are not blocked.
+    if (url.pathname === WEBHOOK_PATH) return handleUniwebWebhook(request, env);
+
+    // Any project auth guard belongs after the webhook route, on these paths.
     if (url.pathname === "/api/pay/link") return createPaymentLink(request, env);
     if (url.pathname === "/api/pay/checkout") return createCheckoutSession(request, env);
-    if (url.pathname === "/api/pay/webhook") return handleUniwebWebhook(request, env);
 
     return json({ error: "not found" }, { status: 404 });
   },
@@ -361,6 +381,10 @@ export default {
 - Do not use `process.env` in Cloudflare Workers; use the `env` argument.
 - Do not put `UNIWEB_SECRET` or `UNIWEB_WEBHOOK_SECRET` in `wrangler.toml`. PinMe injects them during deployment. For local dev, use an uncommitted `.dev.vars` only.
 - Do not omit `webhookUrl` on payment links or products when the project expects webhook-driven fulfillment.
+- Do not hardcode the webhook host or rely solely on `request.url` for `webhookUrl`; build it from the PinMe-injected `env.WORKER_URL` and fall back to `request.url` only when the binding is absent.
 - Do not call `uniweb.webhooks.set`, `uniweb.webhooks.remove`, `uniweb.webhooks.rollSecret`, `uniweb.wallet.update`, refunds, payouts, or subscription mutation APIs unless the user explicitly asks for that flow and the route has project/admin authorization.
+- Do not put the webhook route behind the project's API_KEY / bearer auth guard; UniwebPay callbacks would get 401/403 and orders never fulfill.
+- Do not put secrets or trust-bearing data in `webhookUrl`; carry `orderId` in `metadata` and verify via signature, since a URL query can be forged.
+- Do not set `webhookUrl` only on the wallet fallback for business events; set it per-link or per-product (checkout inherits from its product).
 - Do not mark orders paid from `successUrl` alone.
 - Do not import the SDK in browser-side code.
